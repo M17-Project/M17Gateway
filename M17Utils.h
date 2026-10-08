@@ -20,6 +20,7 @@
 #define  M17Utils_H
 
 #include <string>
+#include <cstdint>
 
 class CM17Utils {
 public:
@@ -28,6 +29,10 @@ public:
 
 	static void encodeCallsign(const std::string& callsign, unsigned char* encoded);
 	static std::string decodeCallsign(const unsigned char* encoded);
+
+	// The M17 CRC-16 (polynomial 0x5935, initial value 0xFFFF)
+	static uint16_t createCRC16(const unsigned char* data, unsigned int length);
+	static void addCRC16(unsigned char* data, unsigned int length);
 
 private:
 };

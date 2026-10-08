@@ -52,6 +52,7 @@ const char* DEFAULT_INI_FILE = "/etc/M17Gateway.ini";
 #endif
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>
@@ -60,6 +61,11 @@ const char* DEFAULT_INI_FILE = "/etc/M17Gateway.ini";
 
 static bool m_killed = false;
 static int  m_signal = 0;
+
+// Probing a reflector with a packet to PARROT, to find whether it uses the legacy protocol
+const unsigned int PROBE_TIMEOUT = 1500U;	// Milliseconds to wait for each reply, about ten times a normal reply
+const unsigned int PROBE_TRIES   = 3U;
+const char*        PROBE_MARKER  = "M17Gateway PARROT probe ";
 
 #if !defined(_WIN32) && !defined(_WIN64)
 static void sigHandler(int signum)
@@ -136,20 +142,148 @@ m_addrLen(0U),
 m_addr(),
 m_module(' '),
 m_writer(nullptr),
-m_gps(nullptr)
+m_gps(nullptr),
+m_legacy(false),
+m_probe(nullptr),
+m_probeLength(0U),
+m_probeTries(0U),
+m_probeTimer(1000U, 0U, PROBE_TIMEOUT)
 {
 	CUDPSocket::startup();
+
+	m_probe = new unsigned char[M17_PACKET_NETWORK_MAX_LENGTH];
+
+	::srand((unsigned int)::time(nullptr));
 }
 
 CM17Gateway::~CM17Gateway()
 {
+	delete[] m_probe;
+
 	CUDPSocket::shutdown();
+}
+
+// Legacy reflectors (urfd, and mrefd before 1.0.0) only forward streams addressed to the reflector
+// and module, and don't support packet mode. A reflector using the current protocol forwards traffic
+// to its real destination, which is passed on unchanged. A reflector is treated as current until it
+// fails to answer a packet sent to PARROT, which no legacy reflector supports.
+bool CM17Gateway::isLegacyReflector() const
+{
+	return m_legacy;
+}
+
+void CM17Gateway::startProbe()
+{
+	m_legacy      = false;
+	m_probeTries  = 0U;
+	m_probeLength = 0U;
+
+	// An M17P packet from this gateway to PARROT, raw data with a random tag so the reply can be recognised
+	unsigned char* p = m_probe;
+	::memcpy(p, "M17P", 4U);
+	p += 4U;
+
+	::memset(p, 0x00U, M17_LSF_LENGTH_BYTES);
+	CM17Utils::encodeCallsign("PARROT", p + 0U);
+	std::string callsign = m_conf.getCallsign();
+	callsign.resize(M17_CALLSIGN_LENGTH - 1U, ' ');
+	callsign += m_conf.getSuffix().substr(0U, 1U);
+	CM17Utils::encodeCallsign(callsign, p + 6U);
+	// TYPE is all zeros for packet mode, and META is unused
+	CM17Utils::addCRC16(p, M17_LSF_LENGTH_BYTES - M17_CRC_LENGTH_BYTES);
+	p += M17_LSF_LENGTH_BYTES;
+
+	unsigned char* payload = p;
+	*p++ = M17_PACKET_PROTOCOL_RAW;
+	::memcpy(p, PROBE_MARKER, ::strlen(PROBE_MARKER));
+	p += ::strlen(PROBE_MARKER);
+	for (unsigned int i = 0U; i < 4U; i++)
+		*p++ = ::rand() & 0xFFU;
+	CM17Utils::addCRC16(payload, p - payload);
+	p += M17_CRC_LENGTH_BYTES;
+
+	m_probeLength = p - m_probe;
+
+	sendProbe();
+}
+
+void CM17Gateway::sendProbe()
+{
+	m_probeTries++;
+	LogDebug("Sending PARROT probe %u to %s", m_probeTries, m_reflector.c_str());
+
+	m_network->writePacket(m_probe, m_probeLength);
+	m_probeTimer.start();
+}
+
+void CM17Gateway::clockProbe(unsigned int ms)
+{
+	m_probeTimer.clock(ms);
+	if (!m_probeTimer.isRunning() || !m_probeTimer.hasExpired())
+		return;
+
+	if (m_status != M17_STATUS::LINKED) {
+		// The link went away, a new probe is sent when it comes back
+		m_probeTimer.stop();
+	} else if (m_probeTries < PROBE_TRIES) {
+		sendProbe();
+	} else {
+		m_probeTimer.stop();
+		m_legacy = true;
+		LogMessage("%s did not answer a packet to PARROT, treating it as a legacy reflector", m_reflector.c_str());
+	}
+}
+
+// Is this the reflector's PARROT reply to the probe? The reflector may readdress it, so only the data is compared
+bool CM17Gateway::isProbeReply(const unsigned char* packet, unsigned int length)
+{
+	assert(packet != nullptr);
+
+	if (m_probeLength == 0U || length != m_probeLength)
+		return false;
+
+	unsigned int offset = 4U + M17_LSF_LENGTH_BYTES;
+	if (::memcmp(packet + offset, m_probe + offset, m_probeLength - offset) != 0)
+		return false;
+
+	if (m_probeTimer.isRunning() || m_legacy)
+		LogMessage("%s answered a packet to PARROT, it uses the current protocol", m_reflector.c_str());
+
+	m_probeTimer.stop();
+	m_legacy = false;
+
+	return true;
 }
 
 // The decoded broadcast address is padded with spaces, which looks odd in the log
 std::string CM17Gateway::trim(const std::string& callsign)
 {
 	return callsign.substr(0U, callsign.find_last_not_of(' ') + 1U);
+}
+
+bool CM17Gateway::isBroadcast(const std::string& dst)
+{
+	std::string trimmed = trim(dst);
+
+	return trimmed.empty() || trimmed == "ALL" || trimmed == "#ALL";
+}
+
+void CM17Gateway::writeStream(unsigned char* buffer, const std::string& src, const std::string& dst)
+{
+	assert(buffer != nullptr);
+
+	if (isLegacyReflector()) {
+		if (isBroadcast(dst)) {
+			CM17Utils::encodeCallsign(m_reflector, buffer + 6U);
+		} else {
+			// Only on the first frame, the last frame of a stream can also have a zero frame number
+			uint16_t fn = (buffer[34U] << 8) + (buffer[35U] << 0);
+			if (fn == 0U)
+				LogMessage("Voice from %s to %s, %s only accepts broadcast traffic, so it will probably be dropped", src.c_str(), dst.c_str(), m_reflector.c_str());
+		}
+	}
+
+	m_network->write(buffer);
 }
 
 int CM17Gateway::run()
@@ -327,6 +461,7 @@ int CM17Gateway::run()
 			case M17NET_STATUS::LINKED:
 				m_status = m_oldStatus = M17_STATUS::LINKED;
 				LogMessage("Linked to %s", m_reflector.c_str());
+				startProbe();
 				break;
 			case M17NET_STATUS::REJECTED:
 				m_status = m_oldStatus = M17_STATUS::NOTLINKED;
@@ -544,17 +679,13 @@ int CM17Gateway::run()
 					}
 				} else {
 					if (m_status == M17_STATUS::LINKED) {
-						// Replace the destination callsign with the reflector name and module
-						CM17Utils::encodeCallsign(m_reflector, buffer + 6U);
-						m_network->write(buffer);
+						writeStream(buffer, src, dst);
 						hangTimer.start();
 					}
 				}
 			} else {
 				if (m_status == M17_STATUS::LINKED) {
-					// Replace the destination callsign with the reflector name and module
-					CM17Utils::encodeCallsign(m_reflector, buffer + 6U);
-					m_network->write(buffer);
+					writeStream(buffer, src, dst);
 					hangTimer.start();
 				}
 			}
@@ -578,6 +709,8 @@ int CM17Gateway::run()
 				echoPacketLength = packetLength;
 				echoPacketTimer.start();
 				hangTimer.start();
+			} else if (m_status == M17_STATUS::LINKED && isLegacyReflector()) {
+				LogMessage("Packet from %s to %s dropped, %s doesn't support packet mode", src.c_str(), dst.c_str(), m_reflector.c_str());
 			} else if (m_status == M17_STATUS::LINKED) {
 				LogMessage("Packet from %s to %s, sending it to %s", src.c_str(), dst.c_str(), m_reflector.c_str());
 
@@ -592,7 +725,7 @@ int CM17Gateway::run()
 		// Packets from the reflector to the MMDVM
 		if (m_status == M17_STATUS::LINKED) {
 			packetLength = m_network->readPacket(packet);
-			if (packetLength > 0U) {
+			if (packetLength > 0U && !isProbeReply(packet, packetLength)) {
 				CM17LSF lsf;
 				lsf.setNetwork(packet + 4U);
 
@@ -711,6 +844,7 @@ int CM17Gateway::run()
 
 		hangTimer.clock(ms);
 		echoPacketTimer.clock(ms);
+		clockProbe(ms);
 		if (hangTimer.isRunning() && hangTimer.hasExpired()) {
 			if (revert && !startupReflector.empty() && m_reflector != startupReflector) {
 				if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)

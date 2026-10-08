@@ -95,3 +95,30 @@ std::string CM17Utils::decodeCallsign(const unsigned char* encoded)
 
 	return callsign;
 }
+
+uint16_t CM17Utils::createCRC16(const unsigned char* data, unsigned int length)
+{
+	assert(data != nullptr);
+
+	uint16_t crc = 0xFFFFU;
+
+	for (unsigned int i = 0U; i < length; i++) {
+		crc ^= uint16_t(data[i]) << 8;
+
+		for (unsigned int j = 0U; j < 8U; j++)
+			crc = (crc & 0x8000U) ? uint16_t((crc << 1) ^ 0x5935U) : uint16_t(crc << 1);
+	}
+
+	return crc;
+}
+
+// Append the CRC of the first length bytes
+void CM17Utils::addCRC16(unsigned char* data, unsigned int length)
+{
+	assert(data != nullptr);
+
+	uint16_t crc = createCRC16(data, length);
+
+	data[length + 0U] = (crc >> 8) & 0xFFU;
+	data[length + 1U] = (crc >> 0) & 0xFFU;
+}

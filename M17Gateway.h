@@ -23,6 +23,7 @@
 #include "APRSWriter.h"
 #include "GPSHandler.h"
 #include "Conf.h"
+#include "Timer.h"
 
 #include <cstdio>
 #include <string>
@@ -67,10 +68,23 @@ private:
 	char             m_module;
 	CAPRSWriter*     m_writer;
 	CGPSHandler*     m_gps;
+	bool             m_legacy;
+	unsigned char*   m_probe;
+	unsigned int     m_probeLength;
+	unsigned int     m_probeTries;
+	CTimer           m_probeTimer;
 
 	void createGPS();
 
+	void startProbe();
+	void sendProbe();
+	void clockProbe(unsigned int ms);
+	bool isProbeReply(const unsigned char* packet, unsigned int length);
+
+	bool isLegacyReflector() const;
 	static std::string trim(const std::string& callsign);
+	static bool isBroadcast(const std::string& dst);
+	void writeStream(unsigned char* buffer, const std::string& src, const std::string& dst);
 };
 
 #endif

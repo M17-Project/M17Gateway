@@ -52,6 +52,7 @@ const unsigned int M17_FRAME_TIME = 40U;
 
 // M17P: the magic, the link setup frame with its CRC, then the packet data with its CRC
 const unsigned int M17_PACKET_MAX_LENGTH_BYTES   = 825U;
+const unsigned char M17_PACKET_PROTOCOL_RAW      = 0x00U;
 const unsigned int M17_PACKET_NETWORK_MIN_LENGTH = 4U + M17_LSF_LENGTH_BYTES + 1U + M17_CRC_LENGTH_BYTES;
 const unsigned int M17_PACKET_NETWORK_MAX_LENGTH = 4U + M17_LSF_LENGTH_BYTES + M17_PACKET_MAX_LENGTH_BYTES;
 
