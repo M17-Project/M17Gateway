@@ -37,6 +37,10 @@ public:
 
 	bool read(unsigned char* data);
 
+	bool writePacket(const unsigned char* data, unsigned int length);
+
+	unsigned int readPacket(unsigned char* data);
+
 	void close();
 
 	void clock(unsigned int ms);
@@ -47,9 +51,12 @@ private:
 	unsigned int     m_addrLen;
 	bool             m_debug;
 	CRingBuffer<unsigned char> m_buffer;
+	CRingBuffer<unsigned char> m_packetBuffer;
 	CTimer           m_timer;
 
 	void sendPing();
+
+	void addPacket(const unsigned char* data, unsigned int length);
 };
 
 #endif

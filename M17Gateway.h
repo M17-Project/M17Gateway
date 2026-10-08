@@ -69,6 +69,8 @@ private:
 	CGPSHandler*     m_gps;
 
 	void createGPS();
+
+	static std::string trim(const std::string& callsign);
 };
 
 #endif

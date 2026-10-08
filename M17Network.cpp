@@ -26,7 +26,7 @@
 #include <cassert>
 #include <cstring>
 
-const unsigned int BUFFER_LENGTH = 200U;
+const unsigned int BUFFER_LENGTH = 1000U;
 
 CM17Network::CM17Network(const std::string& callsign, const std::string& suffix, unsigned short port, bool debug) :
 m_socket(port),
@@ -35,6 +35,7 @@ m_addr(),
 m_addrLen(0U),
 m_debug(debug),
 m_buffer(1000U, "M17 Network"),
+m_packetBuffer(2000U, "M17 Network Packet"),
 m_state(M17NET_STATUS::NOTLINKED),
 m_encoded(nullptr),
 m_module(' '),
@@ -207,6 +208,14 @@ void CM17Network::clock(unsigned int ms)
 		return;
 	}
 
+	if (::memcmp(buffer + 0U, "M17P", 4U) == 0) {
+		if (m_state == M17NET_STATUS::LINKED) {
+			m_timeout.start();
+			addPacket(buffer, length);
+		}
+		return;
+	}
+
 	if (::memcmp(buffer + 0U, "M17 ", 4U) != 0) {
 		CUtils::dump(2U, "Received an unknown packet", buffer, length);
 		return;
@@ -220,6 +229,58 @@ void CM17Network::clock(unsigned int ms)
 
 		m_buffer.addData(buffer, length);
 	}
+}
+
+bool CM17Network::writePacket(const unsigned char* data, unsigned int length)
+{
+	assert(data != nullptr);
+	assert(length >= M17_PACKET_NETWORK_MIN_LENGTH && length <= M17_PACKET_NETWORK_MAX_LENGTH);
+
+	if (m_state != M17NET_STATUS::LINKED)
+		return false;
+
+	if (m_debug)
+		CUtils::dump(1U, "Network Packet Transmitted", data, length);
+
+	return m_socket.write(data, length, m_addr, m_addrLen);
+}
+
+void CM17Network::addPacket(const unsigned char* data, unsigned int length)
+{
+	assert(data != nullptr);
+
+	if ((length < M17_PACKET_NETWORK_MIN_LENGTH) || (length > M17_PACKET_NETWORK_MAX_LENGTH)) {
+		CUtils::dump(2U, "Received an M17P packet with an invalid length", data, length);
+		return;
+	}
+
+	if (m_packetBuffer.freeSpace() < (length + 2U)) {
+		LogWarning("Overflow in the M17P packet buffer");
+		return;
+	}
+
+	unsigned char c[2U];
+	c[0U] = (length >> 8) & 0xFFU;
+	c[1U] = (length >> 0) & 0xFFU;
+	m_packetBuffer.addData(c, 2U);
+
+	m_packetBuffer.addData(data, length);
+}
+
+unsigned int CM17Network::readPacket(unsigned char* data)
+{
+	assert(data != nullptr);
+
+	if (m_packetBuffer.isEmpty())
+		return 0U;
+
+	unsigned char c[2U];
+	m_packetBuffer.getData(c, 2U);
+
+	unsigned int length = (c[0U] << 8) | c[1U];
+	m_packetBuffer.getData(data, length);
+
+	return length;
 }
 
 bool CM17Network::read(unsigned char* data)

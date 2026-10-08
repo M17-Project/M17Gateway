@@ -146,6 +146,12 @@ CM17Gateway::~CM17Gateway()
 	CUDPSocket::shutdown();
 }
 
+// The decoded broadcast address is padded with spaces, which looks odd in the log
+std::string CM17Gateway::trim(const std::string& callsign)
+{
+	return callsign.substr(0U, callsign.find_last_not_of(' ') + 1U);
+}
+
 int CM17Gateway::run()
 {
 	bool ret = m_conf.read();
@@ -263,6 +269,11 @@ int CM17Gateway::run()
 	CEcho echo(240U);
 
 	CTimer hangTimer(1000U, m_conf.getNetworkHangTime());
+
+	// A packet sent to ECHO is returned after a short delay, so the radio has time to return to receive
+	unsigned char* echoPacket = new unsigned char[M17_PACKET_NETWORK_MAX_LENGTH];
+	unsigned int echoPacketLength = 0U;
+	CTimer echoPacketTimer(1000U, 1U);
 
 	CStopWatch stopWatch;
 	stopWatch.start();
@@ -549,6 +560,54 @@ int CM17Gateway::run()
 			}
 		}
 
+		// Packets from the MMDVM to the reflector, or to the echo
+		unsigned char packet[M17_PACKET_NETWORK_MAX_LENGTH];
+		unsigned int packetLength = localNetwork->readPacket(packet);
+		if (packetLength > 0U) {
+			CM17LSF lsf;
+			lsf.setNetwork(packet + 4U);
+
+			// Only used for logging and to compare, the packet itself is unchanged
+			std::string src = trim(lsf.getSource());
+			std::string dst = trim(lsf.getDest());
+
+			if (dst == "ECHO") {
+				LogMessage("Packet from %s to ECHO, returning it", src.c_str());
+
+				::memcpy(echoPacket, packet, packetLength);
+				echoPacketLength = packetLength;
+				echoPacketTimer.start();
+				hangTimer.start();
+			} else if (m_status == M17_STATUS::LINKED) {
+				LogMessage("Packet from %s to %s, sending it to %s", src.c_str(), dst.c_str(), m_reflector.c_str());
+
+				// The destination is left alone, the reflector handles it and it's covered by the CRC
+				m_network->writePacket(packet, packetLength);
+				hangTimer.start();
+			} else {
+				LogMessage("Packet from %s to %s dropped, not linked to a reflector", src.c_str(), dst.c_str());
+			}
+		}
+
+		// Packets from the reflector to the MMDVM
+		if (m_status == M17_STATUS::LINKED) {
+			packetLength = m_network->readPacket(packet);
+			if (packetLength > 0U) {
+				CM17LSF lsf;
+				lsf.setNetwork(packet + 4U);
+
+				LogMessage("Packet from %s to %s received from %s", trim(lsf.getSource()).c_str(), trim(lsf.getDest()).c_str(), m_reflector.c_str());
+
+				localNetwork->writePacket(packet, packetLength);
+				hangTimer.start();
+			}
+		}
+
+		if (echoPacketTimer.isRunning() && echoPacketTimer.hasExpired()) {
+			localNetwork->writePacket(echoPacket, echoPacketLength);
+			echoPacketTimer.stop();
+		}
+
 		if (voice != nullptr) {
 			if (triggerVoice) {
 				uint16_t fn = (buffer[34U] << 8) + (buffer[35U] << 0);
@@ -651,6 +710,7 @@ int CM17Gateway::run()
 		echo.clock(ms);
 
 		hangTimer.clock(ms);
+		echoPacketTimer.clock(ms);
 		if (hangTimer.isRunning() && hangTimer.hasExpired()) {
 			if (revert && !startupReflector.empty() && m_reflector != startupReflector) {
 				if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)
@@ -698,6 +758,8 @@ int CM17Gateway::run()
 
 	localNetwork->close();
 	delete localNetwork;
+
+	delete[] echoPacket;
 
 	if (remoteSocket != nullptr) {
 		remoteSocket->close();

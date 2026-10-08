@@ -50,6 +50,11 @@ const unsigned int M17_CRC_LENGTH_BYTES = M17_CRC_LENGTH_BITS / 8U;
 
 const unsigned int M17_FRAME_TIME = 40U;
 
+// M17P: the magic, the link setup frame with its CRC, then the packet data with its CRC
+const unsigned int M17_PACKET_MAX_LENGTH_BYTES   = 825U;
+const unsigned int M17_PACKET_NETWORK_MIN_LENGTH = 4U + M17_LSF_LENGTH_BYTES + 1U + M17_CRC_LENGTH_BYTES;
+const unsigned int M17_PACKET_NETWORK_MAX_LENGTH = 4U + M17_LSF_LENGTH_BYTES + M17_PACKET_MAX_LENGTH_BYTES;
+
 const unsigned int M17_3200_LENGTH_BYTES = 8U;
 const unsigned char M17_3200_SILENCE[] = { 0x01U, 0x00U, 0x09U, 0x43U, 0x9CU, 0xE4U, 0x21U, 0x08U, 0x01U, 0x00U, 0x09U, 0x43U, 0x9CU, 0xE4U, 0x21U, 0x08U };
 

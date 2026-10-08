@@ -26,7 +26,7 @@
 #include <cassert>
 #include <cstring>
 
-const unsigned int BUFFER_LENGTH = 200U;
+const unsigned int BUFFER_LENGTH = 1000U;
 
 CRptNetwork::CRptNetwork(unsigned short localPort, const std::string& gwyAddress, unsigned short gwyPort, bool debug) :
 m_socket(localPort),
@@ -34,6 +34,7 @@ m_addr(),
 m_addrLen(0U),
 m_debug(debug),
 m_buffer(1000U, "Rpt Network"),
+m_packetBuffer(2000U, "Rpt Network Packet"),
 m_timer(1000U, 5U)
 {
 	if (CUDPSocket::lookup(gwyAddress, gwyPort, m_addr, m_addrLen) != 0) {
@@ -105,6 +106,11 @@ void CRptNetwork::clock(unsigned int ms)
 	if (::memcmp(buffer + 0U, "PING", 4U) == 0)
 		return;
 
+	if (::memcmp(buffer + 0U, "M17P", 4U) == 0) {
+		addPacket(buffer, length);
+		return;
+	}
+
 	if (::memcmp(buffer + 0U, "M17 ", 4U) != 0) {
 		CUtils::dump(2U, "Rpt, received unknown packet", buffer, length);
 		return;
@@ -114,6 +120,58 @@ void CRptNetwork::clock(unsigned int ms)
 	m_buffer.addData(&c, 1U);
 
 	m_buffer.addData(buffer, length);
+}
+
+bool CRptNetwork::writePacket(const unsigned char* data, unsigned int length)
+{
+	assert(data != nullptr);
+	assert(length >= M17_PACKET_NETWORK_MIN_LENGTH && length <= M17_PACKET_NETWORK_MAX_LENGTH);
+
+	if (m_addrLen == 0U)
+		return false;
+
+	if (m_debug)
+		CUtils::dump(1U, "Rpt Network Packet Transmitted", data, length);
+
+	return m_socket.write(data, length, m_addr, m_addrLen);
+}
+
+void CRptNetwork::addPacket(const unsigned char* data, unsigned int length)
+{
+	assert(data != nullptr);
+
+	if ((length < M17_PACKET_NETWORK_MIN_LENGTH) || (length > M17_PACKET_NETWORK_MAX_LENGTH)) {
+		CUtils::dump(2U, "Received an M17P packet with an invalid length", data, length);
+		return;
+	}
+
+	if (m_packetBuffer.freeSpace() < (length + 2U)) {
+		LogWarning("Overflow in the M17P packet buffer");
+		return;
+	}
+
+	unsigned char c[2U];
+	c[0U] = (length >> 8) & 0xFFU;
+	c[1U] = (length >> 0) & 0xFFU;
+	m_packetBuffer.addData(c, 2U);
+
+	m_packetBuffer.addData(data, length);
+}
+
+unsigned int CRptNetwork::readPacket(unsigned char* data)
+{
+	assert(data != nullptr);
+
+	if (m_packetBuffer.isEmpty())
+		return 0U;
+
+	unsigned char c[2U];
+	m_packetBuffer.getData(c, 2U);
+
+	unsigned int length = (c[0U] << 8) | c[1U];
+	m_packetBuffer.getData(data, length);
+
+	return length;
 }
 
 bool CRptNetwork::read(unsigned char* data)
