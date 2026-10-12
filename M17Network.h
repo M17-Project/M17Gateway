@@ -48,6 +48,10 @@ public:
 
 	bool read(unsigned char* data);
 
+	bool writePacket(const unsigned char* data, unsigned int length);
+
+	unsigned int readPacket(unsigned char* data);
+
 	void close();
 
 	void clock(unsigned int ms);
@@ -61,6 +65,7 @@ private:
 	unsigned int     m_addrLen;
 	bool             m_debug;
 	CRingBuffer<unsigned char> m_buffer;
+	CRingBuffer<unsigned char> m_packetBuffer;
 	M17NET_STATUS    m_state;
 	unsigned char*   m_encoded;
 	char             m_module;
@@ -70,6 +75,8 @@ private:
 	void sendConnect();
 	void sendDisconnect();
 	void sendPong();
+
+	void addPacket(const unsigned char* data, unsigned int length);
 };
 
 #endif
