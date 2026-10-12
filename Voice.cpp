@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 
 const unsigned int SILENCE_LENGTH = 4U;
+const unsigned int PAUSE_LENGTH   = 5U;
 
 const unsigned char BIT_MASK_TABLE[] = { 0x80U, 0x40U, 0x20U, 0x10U, 0x08U, 0x04U, 0x02U, 0x01U };
 
@@ -151,14 +152,12 @@ void CVoice::linkedTo(const std::string& reflector)
 		words.push_back("linkedto");
 	}
 
-	// Remove the "M17-" prefix of the reflector name
-	std::string name = reflector;
-	name.erase(0, 4);
-
-	std::string::const_iterator it = name.cbegin();
-	while (it != name.cend()) {
+	std::string::const_iterator it = reflector.cbegin();
+	while (it != reflector.cend()) {
 		if (*it == ' ') {
-			++it;
+			// Shorter names are padded with spaces before the module
+			while (it != reflector.cend() && *it == ' ')
+				++it;
 			break;
 		}
 
@@ -166,7 +165,7 @@ void CVoice::linkedTo(const std::string& reflector)
 		++it;
 	}
 
-	if (it != name.cend()) {
+	if (it != reflector.cend()) {
 		switch (*it) {
 		case 'A':
 			words.push_back("alpha");
@@ -278,7 +277,9 @@ void CVoice::createVoice(const std::vector<std::string>& words, const char* text
 
 	unsigned int m17Length = 0U;
 	for (std::vector<std::string>::const_iterator it = words.begin(); it != words.end(); ++it) {
-		if (m_positions.count(*it) > 0U) {
+		if (*it == "-") {
+			m17Length += PAUSE_LENGTH;
+		} else if (m_positions.count(*it) > 0U) {
 			CPositions* position = m_positions.at(*it);
 			m17Length += position->m_length;
 		} else {
@@ -307,7 +308,11 @@ void CVoice::createVoice(const std::vector<std::string>& words, const char* text
 		createFrame(id, fn, M17_3200_SILENCE, 1U, false);
 
 	for (std::vector<std::string>::const_iterator it = words.begin(); it != words.end(); ++it) {
-		if (m_positions.count(*it) > 0U) {
+		if (*it == "-") {
+			// There's no audio for a hyphen, as in "M17-M17", so pause instead
+			for (unsigned int i = 0U; i < PAUSE_LENGTH; i++)
+				createFrame(id, fn, M17_3200_SILENCE, 1U, false);
+		} else if (m_positions.count(*it) > 0U) {
 			CPositions* position = m_positions.at(*it);
 			unsigned int start  = position->m_start;
 			unsigned int length = position->m_length;
