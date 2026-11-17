@@ -289,6 +289,10 @@ void CM17Gateway::writeStream(unsigned char* buffer, const std::string& src, con
 		}
 	}
 
+	// MMDVMHost sends a zero CRC, and the destination may have changed above. Reflectors pass the CRC on
+	// to their other clients, some of which check it, so it has to be right.
+	CM17Utils::addCRC16(buffer, M17_NETWORK_FRAME_LENGTH - M17_CRC_LENGTH_BYTES);
+
 	m_network->write(buffer);
 }
 
