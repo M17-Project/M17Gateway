@@ -822,6 +822,18 @@ int CM17Gateway::run()
 								}
 
 								hangTimer.start();
+							} else {
+								// Not a module: the old link is gone, say so.
+								LogWarning("Invalid module in %s requested by remote command", reflector.c_str());
+
+								m_reflector.clear();
+								if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)
+									m_status = m_oldStatus = M17_STATUS::UNLINKING;
+
+								if (voice != nullptr) {
+									voice->unlinked();
+									voice->start();
+								}
 							}
 						} else {
 							m_reflector.clear();
@@ -876,23 +888,41 @@ int CM17Gateway::run()
 				if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)
 					m_network->unlink();
 
-				LogMessage("Relinked from %s to %s due to inactivity", m_reflector.c_str(), startupReflector.c_str());
-
+				// The startup reflector may have left the hosts files since
+				// startup (a reload): then unlink rather than follow a null.
 				CM17Reflector* refl = reflectors.find(startupReflector);
-				m_reflector = startupReflector;
-				m_addr      = refl->m_addr;
-				m_addrLen   = refl->m_addrLen;
-				m_module    = startupReflector.at(M17_CALLSIGN_LENGTH - 1U);
+				if (refl != nullptr) {
+					LogMessage("Relinked from %s to %s due to inactivity", m_reflector.c_str(), startupReflector.c_str());
 
-				m_status = m_oldStatus = M17_STATUS::LINKING;
-				m_network->link(m_reflector, m_addr, m_addrLen, m_module);
+					m_reflector = startupReflector;
+					m_addr      = refl->m_addr;
+					m_addrLen   = refl->m_addrLen;
+					m_module    = startupReflector.at(M17_CALLSIGN_LENGTH - 1U);
 
-				if (voice != nullptr) {
-					voice->linkedTo(startupReflector);
-					voice->start();
+					m_status = m_oldStatus = M17_STATUS::LINKING;
+					m_network->link(m_reflector, m_addr, m_addrLen, m_module);
+
+					if (voice != nullptr) {
+						voice->linkedTo(startupReflector);
+						voice->start();
+					}
+
+					hangTimer.start();
+				} else {
+					LogWarning("Unable to relink to %s, it is no longer in the hosts files", startupReflector.c_str());
+
+					if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)
+						m_status = m_oldStatus = M17_STATUS::UNLINKING;
+
+					if (voice != nullptr) {
+						voice->unlinked();
+						voice->start();
+					}
+
+					m_reflector.clear();
+
+					hangTimer.stop();
 				}
-
-				hangTimer.start();
 			} else if (revert && startupReflector.empty() && (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)) {
 				LogMessage("Unlinking from %s due to inactivity", m_reflector.c_str());
 
