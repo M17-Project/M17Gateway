@@ -185,10 +185,7 @@ void CM17Gateway::startProbe()
 
 	::memset(p, 0x00U, M17_LSF_LENGTH_BYTES);
 	CM17Utils::encodeCallsign("PARROT", p + 0U);
-	std::string callsign = m_conf.getCallsign();
-	callsign.resize(M17_CALLSIGN_LENGTH - 1U, ' ');
-	callsign += m_conf.getSuffix().substr(0U, 1U);
-	CM17Utils::encodeCallsign(callsign, p + 6U);
+	CM17Utils::encodeCallsign(linkCallsign(), p + 6U);
 	// TYPE is all zeros for packet mode, and META is unused
 	CM17Utils::addCRC16(p, M17_LSF_LENGTH_BYTES - M17_CRC_LENGTH_BYTES);
 	p += M17_LSF_LENGTH_BYTES;
@@ -256,6 +253,15 @@ bool CM17Gateway::isProbeReply(const unsigned char* packet, unsigned int length)
 }
 
 // The decoded broadcast address is padded with spaces, which looks odd in the log
+// The callsign this gateway links with: the callsign and the suffix in the last place
+std::string CM17Gateway::linkCallsign() const
+{
+	std::string callsign = m_conf.getCallsign();
+	callsign.resize(M17_CALLSIGN_LENGTH - 1U, ' ');
+	callsign += m_conf.getSuffix().substr(0U, 1U);
+	return callsign;
+}
+
 std::string CM17Gateway::trim(const std::string& callsign)
 {
 	return callsign.substr(0U, callsign.find_last_not_of(' ') + 1U);
@@ -282,6 +288,10 @@ void CM17Gateway::writeStream(unsigned char* buffer, const std::string& src, con
 				LogMessage("Voice from %s to %s, %s only accepts broadcast traffic, so it will probably be dropped", src.c_str(), dst.c_str(), m_reflector.c_str());
 		}
 	}
+
+	// MMDVMHost sends a zero CRC, and the destination may have changed above. Reflectors pass the CRC on
+	// to their other clients, some of which check it, so it has to be right.
+	CM17Utils::addCRC16(buffer, M17_NETWORK_FRAME_LENGTH - M17_CRC_LENGTH_BYTES);
 
 	m_network->write(buffer);
 }
@@ -730,6 +740,22 @@ int CM17Gateway::run()
 				lsf.setNetwork(packet + 4U);
 
 				LogMessage("Packet from %s to %s received from %s", trim(lsf.getSource()).c_str(), trim(lsf.getDest()).c_str(), m_reflector.c_str());
+
+				// Mark it as transmitted from the network, as m17-gateway does, so receivers can tell it from
+				// local RF: callsign data naming this gateway and the reflector. The source stays the sender,
+				// so the radio shows who sent it.
+				lsf.setEncryptionType(M17_ENCRYPTION_TYPE_NONE);
+				lsf.setEncryptionSubType(M17_ENCRYPTION_SUB_TYPE_CALLSIGNS);
+
+				unsigned char meta[M17_META_LENGTH_BYTES];
+				::memset(meta, 0x00U, M17_META_LENGTH_BYTES);
+				CM17Utils::encodeCallsign(linkCallsign(), meta + 0U);
+				CM17Utils::encodeCallsign(m_reflector, meta + 6U);
+				lsf.setMeta(meta);
+
+				// The LSF has its own CRC, which MMDVMHost checks, the packet's CRC covers only the payload
+				lsf.getNetwork(packet + 4U);
+				CM17Utils::addCRC16(packet + 4U, M17_LSF_LENGTH_BYTES - M17_CRC_LENGTH_BYTES);
 
 				localNetwork->writePacket(packet, packetLength);
 				hangTimer.start();

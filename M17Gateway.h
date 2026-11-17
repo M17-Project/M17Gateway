@@ -82,6 +82,7 @@ private:
 	bool isProbeReply(const unsigned char* packet, unsigned int length);
 
 	bool isLegacyReflector() const;
+	std::string linkCallsign() const;
 	static std::string trim(const std::string& callsign);
 	static bool isBroadcast(const std::string& dst);
 	void writeStream(unsigned char* buffer, const std::string& src, const std::string& dst);
