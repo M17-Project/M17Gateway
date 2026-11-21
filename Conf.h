@@ -55,6 +55,7 @@ public:
 	std::string  getLogFilePath() const;
 	std::string  getLogFileRoot() const;
 	bool         getLogFileRotate() const;
+	unsigned int getLogMQTTLevel() const;
 
 	// The APRS section
 	bool         getAPRSEnabled() const;
@@ -79,6 +80,15 @@ public:
 	std::string    getNetworkStartup() const;
 	bool           getNetworkRevert() const;
 	bool           getNetworkDebug() const;
+
+	// The MQTT section
+	std::string    getMQTTAddress() const;
+	unsigned short getMQTTPort() const;
+	unsigned int   getMQTTKeepalive() const;
+	bool           getMQTTAuthEnabled() const;
+	std::string    getMQTTUsername() const;
+	std::string    getMQTTPassword() const;
+	std::string    getMQTTName() const;
 
 	// The Remote Commands section
 	bool           getRemoteCommandsEnabled() const;
@@ -108,6 +118,7 @@ private:
 	std::string  m_logFilePath;
 	std::string  m_logFileRoot;
 	bool         m_logFileRotate;
+	unsigned int m_logMQTTLevel;
 
 	bool         m_aprsEnabled;
 	std::string  m_aprsAddress;
@@ -129,6 +140,14 @@ private:
 	std::string    m_networkStartup;
 	bool           m_networkRevert;
 	bool           m_networkDebug;
+
+	std::string    m_mqttAddress;
+	unsigned short m_mqttPort;
+	unsigned int   m_mqttKeepalive;
+	bool           m_mqttAuthEnabled;
+	std::string    m_mqttUsername;
+	std::string    m_mqttPassword;
+	std::string    m_mqttName;
 
 	bool           m_remoteCommandsEnabled;
 	unsigned short m_remoteCommandsPort;

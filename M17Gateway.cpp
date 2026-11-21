@@ -29,6 +29,7 @@
 #include "Utils.h"
 #include "Echo.h"
 #include "Log.h"
+#include "MQTTConnection.h"
 #include "GitVersion.h"
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -61,6 +62,12 @@ const char* DEFAULT_INI_FILE = "/etc/M17Gateway.ini";
 
 static bool m_killed = false;
 static int  m_signal = 0;
+
+// The running gateway, for the MQTT command callback, which has no context of its own
+static CM17Gateway* m_gateway = nullptr;
+
+// Defined in Log.cpp, so log lines can also be published
+extern CMQTTConnection* m_mqtt;
 
 // Probing a reflector with a packet to PARROT, to find whether it uses the legacy protocol
 const unsigned int PROBE_TIMEOUT = 1500U;	// Milliseconds to wait for each reply, about ten times a normal reply
@@ -360,9 +367,9 @@ int CM17Gateway::run()
 #endif
 
 #if !defined(_WIN32) && !defined(_WIN64)
-        ret = ::LogInitialise(m_daemon, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate());
+        ret = ::LogInitialise(m_daemon, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate(), m_conf.getLogMQTTLevel());
 #else
-        ret = ::LogInitialise(false, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate());
+        ret = ::LogInitialise(false, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate(), m_conf.getLogMQTTLevel());
 #endif
 	if (!ret) {
 		::fprintf(stderr, "M17Gateway: unable to open the log file\n");
@@ -376,6 +383,23 @@ int CM17Gateway::run()
 		::close(STDERR_FILENO);
 	}
 #endif
+
+	// MQTT, as in G4KLX's gateway programs, in addition to the log file and the UDP remote commands:
+	// status and link messages on <Name>/json, log lines on <Name>/log, and the remote commands on
+	// <Name>/command, answered on <Name>/response. The connection retries in the background if the
+	// broker isn't there.
+	m_gateway = this;
+	std::vector<std::pair<std::string, void (*)(const unsigned char*, unsigned int)>> subscriptions;
+	if (m_conf.getRemoteCommandsEnabled())
+		subscriptions.push_back(std::make_pair("command", CM17Gateway::onCommand));
+
+	m_mqtt = new CMQTTConnection(m_conf.getMQTTAddress(), m_conf.getMQTTPort(), m_conf.getMQTTName(), m_conf.getMQTTAuthEnabled(), m_conf.getMQTTUsername(), m_conf.getMQTTPassword(), subscriptions, m_conf.getMQTTKeepalive());
+	ret = m_mqtt->open();
+	if (!ret) {
+		delete m_mqtt;
+		m_mqtt = nullptr;
+		LogWarning("Unable to start MQTT, continuing without it");
+	}
 
 	createGPS();
 
@@ -424,6 +448,7 @@ int CM17Gateway::run()
 
 	LogMessage("M17Gateway-%s is starting", VERSION);
 	LogMessage("Built %s %s (GitID #%.7s)", __TIME__, __DATE__, gitversion);
+	writeJSONStatus("M17Gateway is starting");
 
 	std::string startupReflector = m_conf.getNetworkStartup();
 	bool revert = m_conf.getNetworkRevert();
@@ -445,6 +470,7 @@ int CM17Gateway::run()
 
 				m_status = m_oldStatus = M17_STATUS::LINKING;
 				m_network->link(m_reflector, m_addr, m_addrLen, m_module);
+				writeJSONLink("linking", "startup");
 
 				if (voice != nullptr)
 					voice->linkedTo(m_reflector);
@@ -454,8 +480,97 @@ int CM17Gateway::run()
 		}
 	}
 
+	// The link message is retained, so say so when there is no startup reflector rather than leave an old one standing
+	if (m_status == M17_STATUS::NOTLINKED)
+		writeJSONLink("unlinked", "startup");
+
 	if (voice != nullptr)
 		voice->start();
+
+	// Remote commands, over UDP or MQTT, are handled the same way and return a reply, or nothing
+	auto processCommand = [&](std::string command, const std::string& via) -> std::string {
+		// Tools such as netcat add a line ending
+		command.erase(command.find_last_not_of(" \t\r\n") + 1U);
+
+		if (command.compare(0U, 9U, "Reflector") == 0) {
+			std::string reflector = (command.length() > 10U) ? command.substr(10U) : "";
+			std::replace(reflector.begin(), reflector.end(), '_', ' ');
+			reflector.resize(M17_CALLSIGN_LENGTH, ' ');
+
+			if (reflector != m_reflector) {
+				if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING) {
+					LogMessage("Unlinked from reflector %s by remote command%s", m_reflector.c_str(), via.c_str());
+
+					m_network->unlink();
+
+					hangTimer.stop();
+				}
+
+				CM17Reflector* refl = reflectors.find(reflector);
+				if (refl != nullptr) {
+					char module = reflector.at(M17_CALLSIGN_LENGTH - 1U);
+					if (module >= 'A' && module <= 'Z') {
+						m_reflector = reflector;
+						m_addr      = refl->m_addr;
+						m_addrLen   = refl->m_addrLen;
+						m_module    = module;
+
+						// Link to the new reflector
+						LogMessage("Switched to reflector %s by remote command%s", m_reflector.c_str(), via.c_str());
+
+						m_status = m_oldStatus = M17_STATUS::LINKING;
+						m_network->link(m_reflector, m_addr, m_addrLen, m_module);
+						writeJSONLink("linking", "remote");
+
+						if (voice != nullptr) {
+							voice->linkedTo(m_reflector);
+							voice->start();
+						}
+
+						hangTimer.start();
+					} else {
+						// Not a module: the old link is gone, say so.
+						LogWarning("Invalid module in %s requested by remote command%s", reflector.c_str(), via.c_str());
+
+						m_reflector.clear();
+						if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING) {
+							m_status = m_oldStatus = M17_STATUS::UNLINKING;
+							writeJSONLink("unlinked", "remote");
+						}
+
+						if (voice != nullptr) {
+							voice->unlinked();
+							voice->start();
+						}
+					}
+				} else {
+					m_reflector.clear();
+					if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING) {
+						m_status = m_oldStatus = M17_STATUS::UNLINKING;
+						writeJSONLink("unlinked", "remote");
+
+						if (voice != nullptr) {
+							voice->unlinked();
+							voice->start();
+						}
+					}
+
+					hangTimer.stop();
+				}
+			}
+
+			return "";
+		} else if (command.compare(0U, 6U, "status") == 0) {
+			return std::string("m17:") + ((m_network == nullptr) ? "n/a" : ((m_network->getStatus() == M17NET_STATUS::LINKED) ? "conn" : "disc"));
+		} else if (command.compare(0U, 4U, "host") == 0) {
+			std::string ref(m_reflector);
+			std::replace(ref.begin(), ref.end(), ' ', '_');
+			return std::string("m17:\"") + (((m_network == nullptr) || (ref.length() == 0)) ? "NONE" : ref) + "\"";
+		} else {
+			CUtils::dump("Invalid remote command received", (const unsigned char*)command.c_str(), (unsigned int)command.length());
+			return "";
+		}
+	};
 
 	unsigned int n = 0U;
 
@@ -471,11 +586,13 @@ int CM17Gateway::run()
 			case M17NET_STATUS::LINKED:
 				m_status = m_oldStatus = M17_STATUS::LINKED;
 				LogMessage("Linked to %s", m_reflector.c_str());
+				writeJSONLink("linking", "established");
 				startProbe();
 				break;
 			case M17NET_STATUS::REJECTED:
 				m_status = m_oldStatus = M17_STATUS::NOTLINKED;
 				LogMessage("Linking rejected by %s", m_reflector.c_str());
+				writeJSONLink("failed", "rejected");
 				if (voice != nullptr) {
 					voice->unlinked();
 					voice->start();
@@ -483,6 +600,7 @@ int CM17Gateway::run()
 				break;
 			default:
 				LogMessage("Linking failed with %s, trying again", m_reflector.c_str());
+				writeJSONLink("failed", "timer");
 				m_network->link(m_reflector, m_addr, m_addrLen, m_module);
 				break;
 			}
@@ -495,12 +613,15 @@ int CM17Gateway::run()
 				break;
 			case M17NET_STATUS::FAILED:
 				LogMessage("Relinking to reflector %s", m_reflector.c_str());
+				writeJSONLink("relinking", "");
 				m_network->link(m_reflector, m_addr, m_addrLen, m_module);
 				m_status = M17_STATUS::LINKING;
 				break;
 			default:
 				m_status = m_oldStatus = M17_STATUS::NOTLINKED;
 				LogMessage("Link failed with %s", m_reflector.c_str());
+				// Disconnected by the reflector, and not retrying
+				writeJSONLink("failed", "");
 				if (voice != nullptr) {
 					voice->unlinked();
 					voice->start();
@@ -641,6 +762,7 @@ int CM17Gateway::run()
 
 					m_status = m_oldStatus = M17_STATUS::UNLINKING;
 					m_network->unlink();
+					writeJSONLink("unlinked", "user");
 
 					if (voice != nullptr)
 						voice->unlinked();
@@ -673,14 +795,17 @@ int CM17Gateway::run()
 
 						m_status = m_oldStatus = M17_STATUS::LINKING;
 						m_network->link(m_reflector, m_addr, m_addrLen, m_module);
+						writeJSONLink("linking", "user");
 
 						if (voice != nullptr)
 							voice->linkedTo(m_reflector);
 
 						hangTimer.start();
 					} else {
-						if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)
+						if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING) {
 							m_status = m_oldStatus = M17_STATUS::UNLINKING;
+							writeJSONLink("unlinked", "user");
+						}
 
 						if (voice != nullptr)
 							voice->unlinked();
@@ -784,83 +909,19 @@ int CM17Gateway::run()
 		if (remoteSocket != nullptr) {
 			sockaddr_storage addr;
 			unsigned int addrLen;
-			int res = remoteSocket->read(buffer, 200U, addr, addrLen);
+			int res = remoteSocket->read(buffer, 99U, addr, addrLen);
 			if (res > 0) {
-				buffer[res] = '\0';
-				if (::memcmp(buffer + 0U, "Reflector", 9U) == 0) {
-					std::string reflector = ((strlen((char*)buffer + 0U) > 10) ? std::string((char*)(buffer + 10U)) : "");
-					std::replace(reflector.begin(), reflector.end(), '_', ' ');
-					reflector.resize(M17_CALLSIGN_LENGTH, ' ');
-
-					if (reflector != m_reflector) {
-						if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING) {
-							LogMessage("Unlinked from reflector %s by remote command", m_reflector.c_str());
-
-							m_network->unlink();
-
-							hangTimer.stop();
-						}
-
-						CM17Reflector* refl = reflectors.find(reflector);
-						if (refl != nullptr) {
-							char module = reflector.at(M17_CALLSIGN_LENGTH - 1U);
-							if (module >= 'A' && module <= 'Z') {
-								m_reflector = reflector;
-								m_addr      = refl->m_addr;
-								m_addrLen   = refl->m_addrLen;
-								m_module    = module;
-
-								// Link to the new reflector
-								LogMessage("Switched to reflector %s by remote command", m_reflector.c_str());
-
-								m_status = m_oldStatus = M17_STATUS::LINKING;
-								m_network->link(m_reflector, m_addr, m_addrLen, m_module);
-
-								if (voice != nullptr) {
-									voice->linkedTo(m_reflector);
-									voice->start();
-								}
-
-								hangTimer.start();
-							} else {
-								// Not a module: the old link is gone, say so.
-								LogWarning("Invalid module in %s requested by remote command", reflector.c_str());
-
-								m_reflector.clear();
-								if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)
-									m_status = m_oldStatus = M17_STATUS::UNLINKING;
-
-								if (voice != nullptr) {
-									voice->unlinked();
-									voice->start();
-								}
-							}
-						} else {
-							m_reflector.clear();
-							if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING) {
-								m_status = m_oldStatus = M17_STATUS::UNLINKING;
-
-								if (voice != nullptr) {
-									voice->unlinked();
-									voice->start();
-								}
-							}
-
-							hangTimer.stop();
-						}
-					}
-				} else if (::memcmp(buffer + 0U, "status", 6U) == 0) {
-					std::string state = std::string("m17:") + ((m_network == nullptr) ? "n/a" : ((m_network->getStatus() == M17NET_STATUS::LINKED) ? "conn" : "disc"));
-					remoteSocket->write((unsigned char*)state.c_str(), (unsigned int)state.length(), addr, addrLen);
-				} else if (::memcmp(buffer + 0U, "host", 4U) == 0) {
-					std::string ref(m_reflector);
-					std::replace(ref.begin(), ref.end(), ' ', '_');
-					std::string host = std::string("m17:\"") + (((m_network == nullptr) || (ref.length() == 0)) ? "NONE" : ref) + "\"";
-					remoteSocket->write((unsigned char*)host.c_str(), (unsigned int)host.length(), addr, addrLen);
-				} else {
-					CUtils::dump("Invalid remote command received", buffer, res);
-				}
+				std::string reply = processCommand(std::string((char*)buffer, res), "");
+				if (!reply.empty())
+					remoteSocket->write((const unsigned char*)reply.c_str(), (unsigned int)reply.length(), addr, addrLen);
 			}
+		}
+
+		std::string command;
+		while (nextCommand(command)) {
+			std::string reply = processCommand(command, " over MQTT");
+			if (!reply.empty() && m_mqtt != nullptr)
+				m_mqtt->publish("response", reply);
 		}
 
 		unsigned int ms = stopWatch.elapsed();
@@ -901,6 +962,7 @@ int CM17Gateway::run()
 
 					m_status = m_oldStatus = M17_STATUS::LINKING;
 					m_network->link(m_reflector, m_addr, m_addrLen, m_module);
+					writeJSONLink("linking", "timer");
 
 					if (voice != nullptr) {
 						voice->linkedTo(startupReflector);
@@ -911,8 +973,10 @@ int CM17Gateway::run()
 				} else {
 					LogWarning("Unable to relink to %s, it is no longer in the hosts files", startupReflector.c_str());
 
-					if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING)
+					if (m_status == M17_STATUS::LINKED || m_status == M17_STATUS::LINKING) {
 						m_status = m_oldStatus = M17_STATUS::UNLINKING;
+						writeJSONLink("unlinked", "timer");
+					}
 
 					if (voice != nullptr) {
 						voice->unlinked();
@@ -928,6 +992,7 @@ int CM17Gateway::run()
 
 				m_status = m_oldStatus = M17_STATUS::UNLINKING;
 				m_network->unlink();
+				writeJSONLink("unlinked", "timer");
 
 				if (voice != nullptr) {
 					voice->unlinked();
@@ -960,6 +1025,19 @@ int CM17Gateway::run()
 		m_network->unlink();
 	m_network->close();
 	delete m_network;
+
+	writeJSONLink("unlinked", "shutdown");
+	writeJSONStatus("M17Gateway is stopping");
+
+	if (m_mqtt != nullptr) {
+		// Give the MQTT thread time to deliver the last messages, the link message is retained
+		CThread::sleep(500U);
+		m_mqtt->close();
+		delete m_mqtt;
+		m_mqtt = nullptr;
+	}
+
+	m_gateway = nullptr;
 
 	if (m_gps != nullptr) {
 		m_writer->close();
@@ -1013,4 +1091,66 @@ void CM17Gateway::createGPS()
 	}
 
 	m_gps = new CGPSHandler(callsign, rptSuffix, m_writer);
+}
+
+void CM17Gateway::writeJSONStatus(const std::string& message)
+{
+	nlohmann::json json;
+
+	json["timestamp"] = CUtils::createTimestamp();
+	json["message"]   = message;
+
+	WriteJSON("status", json, false);
+}
+
+// As G4KLX's gateway programs' link message, with protocol "m17" and the module in its own field.
+// A completed link is "linking" with the reason "established". Retained, so a dashboard that
+// starts later still sees the current link.
+void CM17Gateway::writeJSONLink(const std::string& action, const std::string& reason)
+{
+	nlohmann::json json;
+
+	json["timestamp"] = CUtils::createTimestamp();
+	json["action"]    = action;
+
+	if (!reason.empty())
+		json["reason"] = reason;
+
+	if (action != "unlinked" && !m_reflector.empty()) {
+		json["reflector"] = trim(m_reflector.substr(0U, M17_CALLSIGN_LENGTH - 1U));
+
+		char module = m_reflector.at(m_reflector.length() - 1U);
+		if (module >= 'A' && module <= 'Z')
+			json["module"] = std::string(1U, module);
+	}
+
+	json["protocol"] = "m17";
+
+	WriteJSON("link", json, true);
+}
+
+// MQTT messages arrive on the MQTT thread, so commands are queued for the main loop
+void CM17Gateway::queueCommand(const std::string& command)
+{
+	std::lock_guard<std::mutex> lock(m_commandMutex);
+	m_commands.push_back(command);
+}
+
+bool CM17Gateway::nextCommand(std::string& command)
+{
+	std::lock_guard<std::mutex> lock(m_commandMutex);
+	if (m_commands.empty())
+		return false;
+
+	command = m_commands.front();
+	m_commands.pop_front();
+	return true;
+}
+
+void CM17Gateway::onCommand(const unsigned char* command, unsigned int length)
+{
+	assert(command != nullptr);
+
+	if (m_gateway != nullptr)
+		m_gateway->queueCommand(std::string((const char*)command, length));
 }

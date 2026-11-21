@@ -30,6 +30,9 @@ public:
 	static void bitsToByteBE(const bool* bits, unsigned char& byte);
 	static void bitsToByteLE(const bool* bits, unsigned char& byte);
 
+	// The current time in UTC, as used in the MQTT JSON messages: 2025-01-01T12:00:00.000Z
+	static std::string createTimestamp();
+
 private:
 };
 
