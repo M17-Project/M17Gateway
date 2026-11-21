@@ -33,7 +33,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential git ca-certificates libgps-dev
+          apt-get install -y --no-install-recommends build-essential git ca-certificates libgps-dev libmosquitto-dev nlohmann-json3-dev
 
       - uses: actions/checkout@v7
 
@@ -42,7 +42,7 @@ jobs:
           # The Makefile runs git for the version, and the container's user doesn't own the checkout
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           set -o pipefail
-          make -j"$(nproc)" CFLAGS="-g -O3 -Wall -DHAVE_LOG_H -std=c++0x -pthread ${{ matrix.cflags }}" LIBS="-lpthread ${{ matrix.libs }}" 2>&1 | tee build.log
+          make -j"$(nproc)" CFLAGS="-g -O3 -Wall -DHAVE_LOG_H -std=c++11 -pthread ${{ matrix.cflags }}" LIBS="-lpthread ${{ matrix.libs }} -lmosquitto" 2>&1 | tee build.log
 
       - name: Report warnings
         if: always()

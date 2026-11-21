@@ -36,6 +36,7 @@ enum class SECTION {
 	APRS,
 	VOICE,
 	NETWORK,
+	MQTT,
 	REMOTE_COMMANDS
 };
 
@@ -61,6 +62,7 @@ m_logFileLevel(0U),
 m_logFilePath(),
 m_logFileRoot(),
 m_logFileRotate(true),
+m_logMQTTLevel(0U),
 m_aprsEnabled(false),
 m_aprsAddress("127.0.0.1"),
 m_aprsPort(8673U),
@@ -79,6 +81,13 @@ m_networkHangTime(60U),
 m_networkStartup(),
 m_networkRevert(false),
 m_networkDebug(false),
+m_mqttAddress("127.0.0.1"),
+m_mqttPort(1883U),
+m_mqttKeepalive(60U),
+m_mqttAuthEnabled(false),
+m_mqttUsername(),
+m_mqttPassword(),
+m_mqttName("m17-gateway"),
 m_remoteCommandsEnabled(false),
 m_remoteCommandsPort(6076U)
 {
@@ -116,6 +125,8 @@ bool CConf::read()
 				section = SECTION::VOICE;
 			else if (::strncmp(buffer, "[Network]", 9U) == 0)
 				section = SECTION::NETWORK;
+			else if (::strncmp(buffer, "[MQTT]", 6U) == 0)
+				section = SECTION::MQTT;
 			else if (::strncmp(buffer, "[Remote Commands]", 17U) == 0)
 				section = SECTION::REMOTE_COMMANDS;
 			else
@@ -198,6 +209,8 @@ bool CConf::read()
 				m_logDisplayLevel = (unsigned int)::atoi(value);
 			else if (::strcmp(key, "FileRotate") == 0)
 				m_logFileRotate = ::atoi(value) ==  1;
+			else if (::strcmp(key, "MQTTLevel") == 0)
+				m_logMQTTLevel = (unsigned int)::atoi(value);
 		} else if (section == SECTION::APRS) {
 			if (::strcmp(key, "Enable") == 0)
 				m_aprsEnabled = ::atoi(value) == 1;
@@ -239,6 +252,21 @@ bool CConf::read()
 				m_networkRevert = ::atoi(value) == 1;
 			else if (::strcmp(key, "Debug") == 0)
 				m_networkDebug = ::atoi(value) == 1;
+		} else if (section == SECTION::MQTT) {
+			if (::strcmp(key, "Address") == 0)
+				m_mqttAddress = value;
+			else if (::strcmp(key, "Port") == 0)
+				m_mqttPort = (unsigned short)::atoi(value);
+			else if (::strcmp(key, "Keepalive") == 0)
+				m_mqttKeepalive = (unsigned int)::atoi(value);
+			else if (::strcmp(key, "Auth") == 0)
+				m_mqttAuthEnabled = ::atoi(value) == 1;
+			else if (::strcmp(key, "Username") == 0)
+				m_mqttUsername = value;
+			else if (::strcmp(key, "Password") == 0)
+				m_mqttPassword = value;
+			else if (::strcmp(key, "Name") == 0)
+				m_mqttName = value;
 		} else if (section == SECTION::REMOTE_COMMANDS) {
 			if (::strcmp(key, "Enable") == 0)
 				m_remoteCommandsEnabled = ::atoi(value) == 1;
@@ -352,6 +380,11 @@ bool CConf::getLogFileRotate() const
 	return m_logFileRotate;
 }
 
+unsigned int CConf::getLogMQTTLevel() const
+{
+	return m_logMQTTLevel;
+}
+
 bool CConf::getAPRSEnabled() const
 {
 	return m_aprsEnabled;
@@ -450,4 +483,39 @@ bool CConf::getRemoteCommandsEnabled() const
 unsigned short CConf::getRemoteCommandsPort() const
 {
 	return m_remoteCommandsPort;
+}
+
+std::string CConf::getMQTTAddress() const
+{
+	return m_mqttAddress;
+}
+
+unsigned short CConf::getMQTTPort() const
+{
+	return m_mqttPort;
+}
+
+unsigned int CConf::getMQTTKeepalive() const
+{
+	return m_mqttKeepalive;
+}
+
+bool CConf::getMQTTAuthEnabled() const
+{
+	return m_mqttAuthEnabled;
+}
+
+std::string CConf::getMQTTUsername() const
+{
+	return m_mqttUsername;
+}
+
+std::string CConf::getMQTTPassword() const
+{
+	return m_mqttPassword;
+}
+
+std::string CConf::getMQTTName() const
+{
+	return m_mqttName;
 }

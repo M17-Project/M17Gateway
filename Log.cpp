@@ -17,6 +17,7 @@
  */
 
 #include "Log.h"
+#include "MQTTConnection.h"
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <Windows.h>
@@ -41,6 +42,10 @@ static FILE* m_fpLog = nullptr;
 static bool m_daemon = false;
 
 static unsigned int m_displayLevel = 2U;
+
+// Set by CM17Gateway when [MQTT] is enabled, log lines then also go to <Name>/log
+CMQTTConnection* m_mqtt = nullptr;
+static unsigned int m_mqttLevel = 0U;
 
 static struct tm m_tm;
 
@@ -124,8 +129,9 @@ bool LogOpen()
 		return logOpenNoRotate();
 }
 
-bool LogInitialise(bool daemon, const std::string& filePath, const std::string& fileRoot, unsigned int fileLevel, unsigned int displayLevel, bool rotate)
+bool LogInitialise(bool daemon, const std::string& filePath, const std::string& fileRoot, unsigned int fileLevel, unsigned int displayLevel, bool rotate, unsigned int mqttLevel)
 {
+	m_mqttLevel    = mqttLevel;
 	m_filePath     = filePath;
 	m_fileRoot     = fileRoot;
 	m_fileLevel    = fileLevel;
@@ -141,8 +147,16 @@ bool LogInitialise(bool daemon, const std::string& filePath, const std::string& 
 
 void LogFinalise()
 {
-	if (m_fpLog != nullptr)
+	if (m_mqtt != nullptr) {
+		m_mqtt->close();
+		delete m_mqtt;
+		m_mqtt = nullptr;
+	}
+
+	if (m_fpLog != nullptr) {
 		::fclose(m_fpLog);
+		m_fpLog = nullptr;
+	}
 }
 
 void Log(unsigned int level, const char* fmt, ...)
@@ -171,13 +185,15 @@ void Log(unsigned int level, const char* fmt, ...)
 
 	va_end(vl);
 
+	if (m_mqtt != nullptr && level >= m_mqttLevel && m_mqttLevel != 0U)
+		m_mqtt->publish("log", buffer);
+
 	if (level >= m_fileLevel && m_fileLevel != 0U) {
 		bool ret = ::LogOpen();
-		if (!ret)
-			return;
-
-		::fprintf(m_fpLog, "%s\n", buffer);
-		::fflush(m_fpLog);
+		if (ret) {
+			::fprintf(m_fpLog, "%s\n", buffer);
+			::fflush(m_fpLog);
+		}
 	}
 
 	if (level >= m_displayLevel && m_displayLevel != 0U) {
@@ -186,7 +202,19 @@ void Log(unsigned int level, const char* fmt, ...)
 	}
 
 	if (level == 6U) {		// Fatal
-		::fclose(m_fpLog);
+		if (m_fpLog != nullptr)
+			::fclose(m_fpLog);
 		exit(1);
+	}
+}
+
+void WriteJSON(const std::string& topLevel, nlohmann::json& json, bool retain)
+{
+	if (m_mqtt != nullptr) {
+		nlohmann::json top;
+
+		top[topLevel] = json;
+
+		m_mqtt->publish("json", top.dump(), retain);
 	}
 }

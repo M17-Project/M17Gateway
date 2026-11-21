@@ -28,6 +28,8 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <deque>
+#include <mutex>
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <netdb.h>
@@ -73,6 +75,8 @@ private:
 	unsigned int     m_probeLength;
 	unsigned int     m_probeTries;
 	CTimer           m_probeTimer;
+	std::mutex       m_commandMutex;
+	std::deque<std::string> m_commands;
 
 	void createGPS();
 
@@ -86,6 +90,13 @@ private:
 	static std::string trim(const std::string& callsign);
 	static bool isBroadcast(const std::string& dst);
 	void writeStream(unsigned char* buffer, const std::string& src, const std::string& dst);
+
+	// MQTT
+	void writeJSONStatus(const std::string& message);
+	void writeJSONLink(const std::string& action, const std::string& reason);
+	void queueCommand(const std::string& command);
+	bool nextCommand(std::string& command);
+	static void onCommand(const unsigned char* command, unsigned int length);
 };
 
 #endif
