@@ -38,6 +38,6 @@ then
 fi
 
 # Download the M17Hosts.txt file
-curl --fail --silent -S -L -o  ${M17HOSTS} -A "M17Gateway - G4KLX" https://hostfiles.refcheck.radio/M17Hosts.txt
+curl --fail --silent -S -L -o  ${M17HOSTS} -A "M17Gateway - G4KLX" https://m17-project.github.io/hostfiles/M17Hosts.txt
 
 exit 0
